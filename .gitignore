@@ -1,0 +1,8 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/ExcelToSQLExporter/bin/Debug
+/packages
+/ExcelToSQLExporter/obj/Debug
+/.vs/ExcelToSQLExporter/CopilotIndices/17.12.38.29086
