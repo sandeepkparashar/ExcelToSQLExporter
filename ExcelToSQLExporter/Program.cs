@@ -5,17 +5,19 @@ using System.IO;
 using System.Linq;
 using ExcelDataReader;
 using System.Text;
+using System.Globalization;
+using CsvHelper;
 
 
 namespace ExcelToSQLExporter
 {
     internal class Program
     {
-        static string connectionString = "Server=SANDEEP-HOME\\SQL2022;Database=pulseIQ_20250226;Integrated Security=True;";
+        static string connectionString = "Server=SANDEEP-HOME\\SQL2022;Database=pulseIQ_20250307;Integrated Security=True;";
 
         static void Main()
         {
-            string directoryPath = @"D:\PulseIq\20250226-CCBTrx\input\New folder"; // Change to your directory path
+            string directoryPath = @"D:\PulseIq\20250307-NewTrx\input\Test"; // Change to your directory path
 
             if (!Directory.Exists(directoryPath))
             {
@@ -43,53 +45,101 @@ namespace ExcelToSQLExporter
 
         static void ProcessCsvFile(string filePath)
         {
-            string tableName = "[CSV_" + Path.GetFileNameWithoutExtension(filePath).Replace(" ", "_")+"]";// Enclose table name in square brackets to make it safe in case there are special characters in the name
+            string tableName = "[CSV_" + Path.GetFileNameWithoutExtension(filePath).Replace(" ", "_") + "]";
 
             using (var reader = new StreamReader(filePath))
+            using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
             {
-                string headerLine = reader.ReadLine();
-                if (headerLine == null) return;
+                // Read the header row first
+                if (!csv.Read() || !csv.ReadHeader())
+                {
+                    Console.WriteLine("CSV file is empty or has no headers");
+                    return;
+                }
 
-                string[] columns = headerLine.Split(',');
+                string[] columns = csv.HeaderRecord;
+                if (columns == null || columns.Length == 0)
+                {
+                    Console.WriteLine("No columns found in CSV file");
+                    return;
+                }
 
+                // Create the SQL table
                 CreateSqlTable(tableName, columns);
 
+                // Use data adapter and bulk copy for better performance
                 using (var sqlConnection = new SqlConnection(connectionString))
                 {
                     sqlConnection.Open();
 
-                    string insertQuery = $"INSERT INTO {tableName} ({string.Join(",", columns.Select(col => $"[{col.Replace("\"", string.Empty)}]"))}) VALUES ({string.Join(",", new string[columns.Length].Select((_, i) => $"@param{i}"))})";
-
-                    using (var command = new SqlCommand(insertQuery, sqlConnection))
+                    // Create a DataTable to hold the CSV data
+                    DataTable dataTable = new DataTable();
+                    foreach (string column in columns)
                     {
+                        dataTable.Columns.Add(column.Replace("\"", string.Empty), typeof(string));
+                    }
+
+                    // Read all records into the DataTable
+                    int rowCount = 0;
+                    while (csv.Read())
+                    {
+                        DataRow row = dataTable.NewRow();
                         for (int i = 0; i < columns.Length; i++)
                         {
-                            command.Parameters.Add(new SqlParameter($"@param{i}", SqlDbType.NVarChar));
-                        }
-
-                        while (!reader.EndOfStream)
-                        {
-                            string[] values = reader.ReadLine()?.Split(',');
-
-                            if (values == null || values.Length != columns.Length) continue;
-
-                            for (int i = 0; i < columns.Length; i++)
+                            try
                             {
-                                command.Parameters[$"@param{i}"].Value = values[i];
+                                row[i] = csv.GetField(i);
                             }
+                            catch (Exception)
+                            {
+                                // Handle parsing errors by setting a default value
+                                row[i] = string.Empty;
+                            }
+                        }
+                        dataTable.Rows.Add(row);
+                        rowCount++;
 
-                            command.ExecuteNonQuery();
+                        // Batch the inserts for better performance
+                        if (rowCount % 1000 == 0)
+                        {
+                            BulkInsertDataTable(sqlConnection, dataTable, tableName);
+                            dataTable.Clear();
                         }
                     }
+
+                    // Insert any remaining rows
+                    if (dataTable.Rows.Count > 0)
+                    {
+                        BulkInsertDataTable(sqlConnection, dataTable, tableName);
+                    }
+
+                    Console.WriteLine($"CSV file '{filePath}' processed successfully. {rowCount} rows inserted.");
                 }
             }
-
-            Console.WriteLine($"CSV file '{filePath}' processed successfully.");
         }
 
+        private static void BulkInsertDataTable(SqlConnection connection, DataTable dataTable, string tableName)
+        {
+            using (SqlBulkCopy bulkCopy = new SqlBulkCopy(connection))
+            {
+                bulkCopy.DestinationTableName = tableName;
+
+                // Map columns by name
+                foreach (DataColumn column in dataTable.Columns)
+                {
+                    string safeColumnName = column.ColumnName.Replace("\"", string.Empty)
+                                                            .Replace("[", string.Empty)
+                                                            .Replace("]", string.Empty);
+                    bulkCopy.ColumnMappings.Add(column.ColumnName, safeColumnName);
+                }
+
+                bulkCopy.BulkCopyTimeout = 600; // 10 minutes timeout
+                bulkCopy.WriteToServer(dataTable);
+            }
+        }
         static void ProcessExcelFile(string filePath)
         {
-            string tableName = "[Excel_" + Path.GetFileNameWithoutExtension(filePath).Replace(" ", "_")+"]";  // Enclose table name in square brackets to make it safe in case there are special characters in the name
+            string tableName = "[Excel_" + Path.GetFileNameWithoutExtension(filePath).Replace(" ", "_") + "]";  // Enclose table name in square brackets to make it safe in case there are special characters in the name
 
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
 
@@ -111,7 +161,7 @@ namespace ExcelToSQLExporter
                 {
                     sqlConnection.Open();
 
-                    string insertQuery = $"INSERT INTO {tableName} ({string.Join(", ", columns.Select(col => $"[{col.Replace("\"", string.Empty)}]"))}) VALUES ({string.Join(",", new string[columns.Length].Select((_, i) => $"@param{i}"))})";
+                    string insertQuery = $"INSERT INTO {tableName} ({string.Join(", ", columns.Select(col => $"[{col.Replace("\"", string.Empty).Replace("[", string.Empty).Replace("]", string.Empty)}]"))}) VALUES ({string.Join(",", new string[columns.Length].Select((_, i) => $"@param{i}"))})";
 
                     using (var command = new SqlCommand(insertQuery, sqlConnection))
                     {
@@ -140,7 +190,7 @@ namespace ExcelToSQLExporter
 
         static void CreateSqlTable(string tableName, string[] columns)
         {
-            
+
 
             using (var sqlConnection = new SqlConnection(connectionString))
             {
@@ -152,7 +202,7 @@ namespace ExcelToSQLExporter
                     checkCommand.ExecuteNonQuery();
                 }
 
-                string createTableQuery = $"CREATE TABLE {tableName} ({string.Join(", ", columns.Select(col => $"[{col.Replace("\"",string.Empty)}] NVARCHAR(MAX)"))});";
+                string createTableQuery = $"CREATE TABLE {tableName} ({string.Join(", ", columns.Select(col => $"[{col.Replace("\"", string.Empty).Replace("[", string.Empty).Replace("]", string.Empty)}] NVARCHAR(MAX)"))});";
                 using (var command = new SqlCommand(createTableQuery, sqlConnection))
                 {
                     command.ExecuteNonQuery();
